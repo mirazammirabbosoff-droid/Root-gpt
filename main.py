@@ -1,9 +1,12 @@
 import asyncio
 import base64
+import http.server
 import logging
 import os
 import re
+import socketserver
 import sqlite3
+import threading
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -16,10 +19,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 from dotenv import load_dotenv
-from huggingface_hub import InferenceClient
-import http.server
-import socketserver
-import threading
+import google.generativeai as genai
 
 # Получаем порт от Render или ставим дефолтный 10000
 PORT = int(os.environ.get("PORT", 10000))
@@ -32,15 +32,16 @@ def run_web_server():
     httpd.serve_forever()
 
 
-# Запускаем веб-сервер в отдельном потоке, чтобы он не мешал aiogram
+# Запускаем веб-сервер в отдельном потоке для Render Health-Check
 threading.Thread(target=run_web_server, daemon=True).start()
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+# Инициализация Google Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
 
 INSTRUCTIONS = (
     "Ты — RootGPT, элитный ИИ-архитектор и Senior Full-Stack Инженер @Azamc1kk, созданный им лично. "
@@ -154,6 +155,14 @@ INSTRUCTIONS = (
     "101. Всегда перед выдачей кода пользователю обязательно проверяй название файла и разметку, чтобы каждый язык находился в своем правильном файле."
 )
 
+# Настройка модели Gemini с системной инструкцией
+generation_config = {"temperature": 0.5, "max_output_tokens": 4096}
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=INSTRUCTIONS,
+    generation_config=generation_config,
+)
+
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(
@@ -161,7 +170,6 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-client = InferenceClient(api_key=HF_TOKEN)
 
 
 # --- БАЗА ДАННЫХ И МИГРАЦИЯ ---
@@ -195,22 +203,6 @@ def init_db():
         )
     """
   )
-
-  try:
-    cursor.execute("SELECT session_id FROM messages LIMIT 1")
-  except sqlite3.OperationalError:
-    cursor.execute("DROP TABLE IF EXISTS messages")
-    cursor.execute(
-        """
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER,
-                role TEXT,
-                content TEXT
-            )
-        """
-    )
-
   conn.commit()
   conn.close()
 
@@ -308,21 +300,6 @@ def update_session_title(session_id, first_message):
   conn.close()
 
 
-def get_db_history(session_id):
-  conn = sqlite3.connect("bot_database.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "SELECT role, content FROM messages WHERE session_id = ?", (session_id,)
-  )
-  rows = cursor.fetchall()
-  conn.close()
-
-  history = [{"role": "system", "content": INSTRUCTIONS}]
-  for row in rows:
-    history.append({"role": row[0], "content": row[1]})
-  return history
-
-
 def add_to_db(session_id, role, content):
   conn = sqlite3.connect("bot_database.db")
   cursor = conn.cursor()
@@ -364,12 +341,29 @@ def detect_filename_and_clean_code(text):
   return "code.txt", text
 
 
-def query_ai(messages_list):
+# Функция запроса к Gemini с учетом истории чата
+def query_gemini(session_id, current_payload):
   try:
-    completion = client.chat.completions.create(
-        model=MODEL_ID, messages=messages_list, max_tokens=4096, temperature=0.5
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id"
+        " ASC",
+        (session_id,),
     )
-    return completion.choices[0].message.content.strip()
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Формируем историю для Gemini (все сообщения кроме последнего текущего)
+    history_rows = rows[:-1] if len(rows) > 1 else []
+    gemini_history = []
+    for r, c in history_rows:
+      role = "user" if r == "user" else "model"
+      gemini_history.append({"role": role, "parts": [str(c)]})
+
+    chat = model.start_chat(history=gemini_history)
+    response = chat.send_message(current_payload)
+    return response.text
   except Exception as e:
     return f"Ошибка при запросе к ИИ: {e}"
 
@@ -395,9 +389,10 @@ async def process_and_reply(message: types.Message, user_content_payload):
   await bot.send_chat_action(message.chat.id, "typing")
 
   if isinstance(user_content_payload, list):
-    text_for_db = next(
-        (item["text"] for item in user_content_payload if item["type"] == "text"),
-        "[Изображение]",
+    text_for_db = (
+        user_content_payload[0]
+        if isinstance(user_content_payload[0], str)
+        else "[Изображение]"
     )
   else:
     text_for_db = user_content_payload
@@ -405,12 +400,10 @@ async def process_and_reply(message: types.Message, user_content_payload):
   update_session_title(session_id, text_for_db)
   add_to_db(session_id, "user", text_for_db)
 
-  history = get_db_history(session_id)
-  if isinstance(user_content_payload, list):
-    history[-1]["content"] = user_content_payload
-
   loop = asyncio.get_event_loop()
-  response = await loop.run_in_executor(None, query_ai, history)
+  response = await loop.run_in_executor(
+      None, query_gemini, session_id, user_content_payload
+  )
 
   add_to_db(session_id, "assistant", response)
 
@@ -449,7 +442,7 @@ async def start(message: types.Message):
   user_id = message.from_user.id
   create_new_session(user_id)
   await message.answer(
-      "⚡ <b>RootGPT успешно инициализирован!</b>\n\n"
+      "⚡ <b>RootGPT (Gemini Edition) успешно инициализирован!</b>\n\n"
       "• Автоматически общаюсь на том же языке, на котором пишешь ты.\n"
       "• Создаю ультра-стильный фронтенд и пишу чистый код.\n"
       "• Кнопка <b>«➕ Новый чат»</b> — начать с чистого листа.\n"
@@ -533,17 +526,10 @@ async def handle_photo(message: types.Message):
   photo = message.photo[-1]
   file_info = await bot.get_file(photo.file_id)
   file_bytes_io = await bot.download_file(file_info.file_path)
-
   image_bytes = file_bytes_io.read()
-  encoded_image = base64.b64encode(image_bytes).decode("utf-8")
 
-  payload = [
-      {"type": "text", "text": caption},
-      {
-          "type": "image_url",
-          "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
-      },
-  ]
+  # Передаем картинку в формате, понятном для Google Gemini SDK
+  payload = [caption, {"mime_type": "image/jpeg", "data": image_bytes}]
 
   await process_and_reply(message, payload)
 
