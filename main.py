@@ -40,7 +40,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-MODEL_ID = "Qwen/Qwen2.5-VL-72B-Instruct"
+model = "Qwen/Qwen2-VL-7B-Instruct"
 
 INSTRUCTIONS = (
     "Ты — RootGPT, элитный ИИ-архитектор и Senior Full-Stack Инженер @Azamc1kk, созданный им лично. "
