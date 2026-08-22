@@ -40,7 +40,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+MODEL_ID = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
 
 INSTRUCTIONS = (
     "Ты — RootGPT, элитный ИИ-архитектор и Senior Full-Stack Инженер @Azamc1kk, созданный им лично. "
