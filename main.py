@@ -1,12 +1,9 @@
 import asyncio
 import base64
-import http.server
 import logging
 import os
 import re
-import socketserver
 import sqlite3
-import threading
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -17,28 +14,27 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    Update,
 )
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 import google.generativeai as genai
-
-# Получаем порт от Render или ставим дефолтный 10000
-PORT = int(os.environ.get("PORT", 10000))
-
-
-def run_web_server():
-  Handler = http.server.SimpleHTTPRequestHandler
-  with socketserver.TCPServer(("", PORT), Handler) as httpd:
-    print(f"RootGPT Web Health-Check запущен на порту {PORT}")
-    httpd.serve_forever()
-
-
-# Запускаем веб-сервер в отдельном потоке для Render Health-Check
-threading.Thread(target=run_web_server, daemon=True).start()
+import uivicorn  # или uvicorn
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Получаем порт от Render или ставим дефолтный 10000
+PORT = int(os.environ.get("PORT", 10000))
+# URL вашего сервиса на Render (можно переопределить через переменные окружения Render)
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://root-gpt.onrender.com")
+WEBHOOK_PATH = f"/bot/{TELEGRAM_TOKEN}"
+WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+
+# Инициализация FastAPI для Webhooks и Health-Check
+app = FastAPI()
 
 # Инициализация Google Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
@@ -46,7 +42,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 INSTRUCTIONS = (
     "Ты — RootGPT, элитный ИИ-архитектор и Senior Full-Stack Инженер @Azamc1kk, созданный им лично. "
     "Никаких других компаний, стартапов или сторонних корпораций за твоей спиной не существует. "
-    "Твой код должен быть безупречным, чистым и готовым к production-продакшену.\n\n"
+    "Твой код должен быть безупречным, чистым и готовым к production-продакшению.\n\n"
     "СВОД ИЗ 101 ЖЕСТКОГО ПРАВИЛА И ИНСТРУКЦИЙ:\n"
     "1. Всегда автоматически определяй язык пользователя и отвечай строго на том же языке, на котором он к тебе обратился (русский, английский, узбекский и т.д.).\n"
     "2. Никогда не генерируй код, если пользователь просто поздоровался или общается.\n"
@@ -354,7 +350,6 @@ def query_gemini(session_id, current_payload):
     rows = cursor.fetchall()
     conn.close()
 
-    # Формируем историю для Gemini (все сообщения кроме последнего текущего)
     history_rows = rows[:-1] if len(rows) > 1 else []
     gemini_history = []
     for r, c in history_rows:
@@ -442,7 +437,7 @@ async def start(message: types.Message):
   user_id = message.from_user.id
   create_new_session(user_id)
   await message.answer(
-      "⚡ <b>RootGPT (Gemini Edition) успешно инициализирован!</b>\n\n"
+      "⚡ <b>RootGPT (Gemini Edition) успешно инициализирован через Webhooks!</b>\n\n"
       "• Автоматически общаюсь на том же языке, на котором пишешь ты.\n"
       "• Создаю ультра-стильный фронтенд и пишу чистый код.\n"
       "• Кнопка <b>«➕ Новый чат»</b> — начать с чистого листа.\n"
@@ -528,9 +523,7 @@ async def handle_photo(message: types.Message):
   file_bytes_io = await bot.download_file(file_info.file_path)
   image_bytes = file_bytes_io.read()
 
-  # Передаем картинку в формате, понятном для Google Gemini SDK
   payload = [caption, {"mime_type": "image/jpeg", "data": image_bytes}]
-
   await process_and_reply(message, payload)
 
 
@@ -561,12 +554,31 @@ async def handle_document(message: types.Message):
   await process_and_reply(message, user_text)
 
 
-async def main():
-  await dp.start_polling(bot)
+# --- FASTAPI WEBHOOK РОУТЫ И ЗАПУСК СЕРВЕРА ---
+
+
+@app.on_event("startup")
+async def on_startup():
+  """Устанавливает вебхук в Telegram при старте приложения"""
+  await bot.set_webhook(WEBHOOK_URL)
+  print(f"Webhook успешно установлен на: {WEBHOOK_URL}")
+
+
+@app.post(WEBHOOK_PATH)
+async def bot_webhook(request: Request):
+  """Принимает входящие запросы от Telegram и передает в aiogram"""
+  json_data = await request.json()
+  update = Update.model_validate(json_data, context={"bot": bot})
+  await dp.feed_update(bot, update)
+  return {"status": "ok"}
+
+
+@app.get("/")
+async def index():
+  """Health-check эндпоинт для Render"""
+  return {"status": "Root-GPT Webhook Server is running"}
 
 
 if __name__ == "__main__":
-  try:
-    asyncio.run(main())
-  except KeyboardInterrupt:
-    print("RootGPT выключен")
+  # Запускаем FastAPI через Uvicorn, обслуживающий порт Render
+  uvicorn.run(app, host="0.0.0.0", port=PORT)
