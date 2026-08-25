@@ -329,7 +329,7 @@ def detect_filename_and_clean_code(text):
   return "code.txt", text
 
 
-# Robust Groq Query with Clean Error Handling (Using llama-3.1-8b-instant)
+# Robust Groq Query with Clean Error Handling
 async def query_groq(session_id, current_payload):
   try:
     conn = sqlite3.connect("bot_database.db")
@@ -352,7 +352,7 @@ async def query_groq(session_id, current_payload):
     messages.append({"role": "user", "content": str(current_payload)})
 
     chat_completion = await groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",  # <--- Актуальная и стабильная модель
+        model="openai/gpt-oss-20b",
         messages=messages,
         temperature=0.5,
         max_tokens=4096,
@@ -438,8 +438,8 @@ async def start(message: types.Message):
   user_id = message.from_user.id
   create_new_session(user_id)
   await message.answer(
-      "⚡ <b>RootGPT (Groq Llama 3.1 Edition) initialized via Webhooks!</b>\n\n"
-      "• Powered by ultra-fast Groq Llama 3.1 8B Instant.\n"
+      "⚡ <b>RootGPT initialized via Webhooks!</b>\n\n"
+      "• Powered by ultra-fast Groq API.\n"
       "• Creates clean frontend code and architecture.\n"
       "• <b>«➕ New Chat»</b> — start fresh.\n"
       "• <b>«📜 My Chats»</b> — view and switch chat history.",
@@ -518,7 +518,7 @@ async def handle_text(message: types.Message):
 async def handle_photo(message: types.Message):
   caption = message.caption or "Analyze this image."
   await message.answer(
-      "📸 Image received (Groq text model active).",
+      "📸 Image received.",
       reply_markup=get_main_keyboard(),
   )
   await process_and_reply(message, f"[User sent an image with caption: {caption}]")
@@ -575,6 +575,7 @@ async def bot_webhook(request: Request):
 
 
 @app.get("/")
+@app.head("/")  # <--- Добавлено для корректной обработки HEAD запросов мониторинга
 async def index():
   """Health-check endpoint for Render"""
   return {"status": "Root-GPT Groq Webhook Server is running"}
