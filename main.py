@@ -352,7 +352,7 @@ async def query_groq(session_id, current_payload):
     messages.append({"role": "user", "content": str(current_payload)})
 
     chat_completion = await groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",  # <--- Актуальная и стабильная модель
+        model="openai/gpt-oss-20b",  # <--- Актуальная и стабильная модель
         messages=messages,
         temperature=0.5,
         max_tokens=4096,
