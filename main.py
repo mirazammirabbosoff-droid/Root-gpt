@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import logging
 import os
 import re
@@ -19,24 +18,21 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 import google.generativeai as genai
-import uivicorn  # или uvicorn
+import uvicorn
 
 load_dotenv()
 
+# Environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Получаем порт от Render или ставим дефолтный 10000
 PORT = int(os.environ.get("PORT", 10000))
-# URL вашего сервиса на Render (можно переопределить через переменные окружения Render)
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://root-gpt.onrender.com")
 WEBHOOK_PATH = f"/bot/{TELEGRAM_TOKEN}"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
-# Инициализация FastAPI для Webhooks и Health-Check
+# FastAPI & Bot Initialization
 app = FastAPI()
-
-# Инициализация Google Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
 
 INSTRUCTIONS = (
@@ -151,10 +147,11 @@ INSTRUCTIONS = (
     "101. Всегда перед выдачей кода пользователю обязательно проверяй название файла и разметку, чтобы каждый язык находился в своем правильном файле."
 )
 
-# Настройка модели Gemini с системной инструкцией
 generation_config = {"temperature": 0.5, "max_output_tokens": 4096}
+
+# Using gemini-1.5-flash as a reliable, fast, production model choice
 model = genai.GenerativeModel(
-    model_name="gemini-3.7-flash",
+    model_name="gemini-1.5-flash",
     system_instruction=INSTRUCTIONS,
     generation_config=generation_config,
 )
@@ -168,7 +165,7 @@ bot = Bot(
 dp = Dispatcher()
 
 
-# --- БАЗА ДАННЫХ И МИГРАЦИЯ ---
+# --- DATABASE SETUP ---
 def init_db():
   conn = sqlite3.connect("bot_database.db")
   cursor = conn.cursor()
@@ -225,7 +222,7 @@ def get_or_create_active_session(user_id):
 
   cursor.execute(
       "INSERT INTO sessions (user_id, title) VALUES (?, ?)",
-      (user_id, "Новый чат"),
+      (user_id, "New Chat"),
   )
   session_id = cursor.lastrowid
   cursor.execute(
@@ -243,7 +240,7 @@ def create_new_session(user_id):
   cursor = conn.cursor()
   cursor.execute(
       "INSERT INTO sessions (user_id, title) VALUES (?, ?)",
-      (user_id, "Новый чат"),
+      (user_id, "New Chat"),
   )
   session_id = cursor.lastrowid
   cursor.execute(
@@ -288,8 +285,8 @@ def update_session_title(session_id, first_message):
   conn = sqlite3.connect("bot_database.db")
   cursor = conn.cursor()
   cursor.execute(
-      "UPDATE sessions SET title = ? WHERE session_id = ? AND title = 'Новый"
-      " чат'",
+      "UPDATE sessions SET title = ? WHERE session_id = ? AND title = 'New"
+      " Chat'",
       (title, session_id),
   )
   conn.commit()
@@ -337,7 +334,7 @@ def detect_filename_and_clean_code(text):
   return "code.txt", text
 
 
-# Функция запроса к Gemini с учетом истории чата
+# Robust Gemini Query with Clean Error Handling (Handles 429 quota limits gracefully)
 def query_gemini(session_id, current_payload):
   try:
     conn = sqlite3.connect("bot_database.db")
@@ -360,7 +357,14 @@ def query_gemini(session_id, current_payload):
     response = chat.send_message(current_payload)
     return response.text
   except Exception as e:
-    return f"Ошибка при запросе к ИИ: {e}"
+    err_str = str(e)
+    if "429" in err_str or "quota" in err_str.lower():
+      return (
+          "⚠️ <b>API Quota Exceeded:</b> You have reached the free tier limit"
+          " for your Gemini API key. Please generate a new API key in Google AI"
+          " Studio and update it in your Render environment variables."
+      )
+    return f"⚠️ An error occurred while communicating with AI: {err_str}"
 
 
 async def safe_send_message(message: types.Message, text: str):
@@ -372,7 +376,9 @@ async def safe_send_message(message: types.Message, text: str):
 
 def get_main_keyboard():
   return ReplyKeyboardMarkup(
-      keyboard=[[KeyboardButton(text="➕ Новый чат"), KeyboardButton(text="📜 Мои чаты")]],
+      keyboard=[
+          [KeyboardButton(text="➕ New Chat"), KeyboardButton(text="📜 My Chats")]
+      ],
       resize_keyboard=True,
   )
 
@@ -387,7 +393,7 @@ async def process_and_reply(message: types.Message, user_content_payload):
     text_for_db = (
         user_content_payload[0]
         if isinstance(user_content_payload[0], str)
-        else "[Изображение]"
+        else "[Image]"
     )
   else:
     text_for_db = user_content_payload
@@ -417,7 +423,7 @@ async def process_and_reply(message: types.Message, user_content_payload):
 
     await message.answer_document(
         document=input_file,
-        caption=f"📁 Файл проекта: <b>{filename}</b>",
+        caption=f"📁 Project file: <b>{filename}</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_keyboard(),
     )
@@ -429,7 +435,7 @@ async def process_and_reply(message: types.Message, user_content_payload):
       await safe_send_message(message, response)
 
 
-# --- КОМАНДЫ И КНОПКИ ---
+# --- COMMANDS ---
 
 
 @dp.message(Command("start"))
@@ -437,29 +443,30 @@ async def start(message: types.Message):
   user_id = message.from_user.id
   create_new_session(user_id)
   await message.answer(
-      "⚡ <b>RootGPT (Gemini Edition) успешно инициализирован через Webhooks!</b>\n\n"
-      "• Автоматически общаюсь на том же языке, на котором пишешь ты.\n"
-      "• Создаю ультра-стильный фронтенд и пишу чистый код.\n"
-      "• Кнопка <b>«➕ Новый чат»</b> — начать с чистого листа.\n"
-      "• Кнопка <b>«📜 Мои чаты»</b> — история всех веток.",
+      "⚡ <b>RootGPT (Gemini Edition) initialized via Webhooks!</b>\n\n"
+      "• Automatically detects your language and replies accordingly.\n"
+      "• Creates clean frontend code and architecture.\n"
+      "• <b>«➕ New Chat»</b> — start fresh.\n"
+      "• <b>«📜 My Chats»</b> — view and switch chat history.",
       reply_markup=get_main_keyboard(),
       parse_mode=ParseMode.HTML,
   )
 
 
-@dp.message(F.text == "➕ Новый чат")
+@dp.message(F.text == "➕ New Chat")
 @dp.message(Command("new"))
 async def handle_new_chat_button(message: types.Message):
   user_id = message.from_user.id
   create_new_session(user_id)
   await message.answer(
-      "🔄 <b>Новая сессия RootGPT запущена!</b>\n\nСистема готова к работе. Что создаем?",
+      "🔄 <b>New RootGPT session started!</b>\n\nSystem is ready. What are we"
+      " building?",
       reply_markup=get_main_keyboard(),
       parse_mode=ParseMode.HTML,
   )
 
 
-@dp.message(F.text == "📜 Мои чаты")
+@dp.message(F.text == "📜 My Chats")
 @dp.message(Command("chats"))
 async def show_chats(message: types.Message):
   user_id = message.from_user.id
@@ -467,7 +474,8 @@ async def show_chats(message: types.Message):
 
   if not sessions:
     await message.answer(
-        "У тебя пока нет сохраненных сессий.", reply_markup=get_main_keyboard()
+        "You don't have any saved sessions yet.",
+        reply_markup=get_main_keyboard(),
     )
     return
 
@@ -484,7 +492,7 @@ async def show_chats(message: types.Message):
 
   keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
   await message.answer(
-      "<b>📜 Твои сессии RootGPT:</b>\nВыбери нужный чат для переключения:",
+      "<b>📜 Your RootGPT Sessions:</b>\nSelect a chat to switch:",
       reply_markup=keyboard,
       parse_mode=ParseMode.HTML,
   )
@@ -497,13 +505,13 @@ async def handle_switch_chat(callback: types.CallbackQuery):
 
   switch_session(user_id, session_id)
   await callback.message.answer(
-      f"🔄 Успешно переключился на сессию #{session_id}!",
+      f"🔄 Successfully switched to session #{session_id}!",
       reply_markup=get_main_keyboard(),
   )
   await callback.answer()
 
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ И МЕДИА ---
+# --- MESSAGE & MEDIA HANDLERS ---
 
 
 @dp.message(F.text)
@@ -513,9 +521,9 @@ async def handle_text(message: types.Message):
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-  caption = message.caption or "Опиши и проанализируй это изображение."
+  caption = message.caption or "Describe and analyze this image."
   await message.answer(
-      "📸 Анализирую изображение...", reply_markup=get_main_keyboard()
+      "📸 Analyzing image...", reply_markup=get_main_keyboard()
   )
 
   photo = message.photo[-1]
@@ -529,44 +537,46 @@ async def handle_photo(message: types.Message):
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
-  user_text = "[Пользователь отправил голосовое сообщение]"
-  await message.answer("🎙 Голосовое получено!", reply_markup=get_main_keyboard())
+  user_text = "[User sent a voice message]"
+  await message.answer(
+      "🎙 Voice message received!", reply_markup=get_main_keyboard()
+  )
   await process_and_reply(message, user_text)
 
 
 @dp.message(F.video | F.video_note)
 async def handle_video(message: types.Message):
   caption = message.caption or ""
-  user_text = f"[Пользователь отправил видеоматериал. Подпись: {caption}]"
-  await message.answer("🎬 Видео принято!", reply_markup=get_main_keyboard())
+  user_text = f"[User sent a video. Caption: {caption}]"
+  await message.answer("🎬 Video received!", reply_markup=get_main_keyboard())
   await process_and_reply(message, user_text)
 
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
   doc_name = message.document.file_name
-  user_text = f"[Пользователь отправил документ: {doc_name}]"
+  user_text = f"[User sent a document: {doc_name}]"
   await message.answer(
-      f"📄 Документ <b>{doc_name}</b> загружен в систему!",
+      f"📄 Document <b>{doc_name}</b> uploaded to the system!",
       reply_markup=get_main_keyboard(),
       parse_mode=ParseMode.HTML,
   )
   await process_and_reply(message, user_text)
 
 
-# --- FASTAPI WEBHOOK РОУТЫ И ЗАПУСК СЕРВЕРА ---
+# --- FASTAPI WEBHOOK ROUTES & SERVER STARTUP ---
 
 
 @app.on_event("startup")
 async def on_startup():
-  """Устанавливает вебхук в Telegram при старте приложения"""
+  """Automatically sets up the Telegram webhook on app startup"""
   await bot.set_webhook(WEBHOOK_URL)
-  print(f"Webhook успешно установлен на: {WEBHOOK_URL}")
+  print(f"Webhook successfully set to: {WEBHOOK_URL}")
 
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
-  """Принимает входящие запросы от Telegram и передает в aiogram"""
+  """Receives updates from Telegram and feeds them into aiogram"""
   json_data = await request.json()
   update = Update.model_validate(json_data, context={"bot": bot})
   await dp.feed_update(bot, update)
@@ -575,10 +585,9 @@ async def bot_webhook(request: Request):
 
 @app.get("/")
 async def index():
-  """Health-check эндпоинт для Render"""
+  """Health-check endpoint for Render"""
   return {"status": "Root-GPT Webhook Server is running"}
 
 
 if __name__ == "__main__":
-  # Запускаем FastAPI через Uvicorn, обслуживающий порт Render
   uvicorn.run(app, host="0.0.0.0", port=PORT)
