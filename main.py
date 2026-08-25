@@ -348,7 +348,7 @@ async def query_groq(session_id, current_payload):
     messages.append({"role": "user", "content": str(current_payload)})
 
     chat_completion = await groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.2-3b-preview",
         messages=messages,
         temperature=0.5,
         max_tokens=4096,
