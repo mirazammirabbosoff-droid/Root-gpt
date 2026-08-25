@@ -554,8 +554,11 @@ async def handle_document(message: types.Message):
 @app.on_event("startup")
 async def on_startup():
   """Automatically sets up the Telegram webhook on app startup"""
-  await bot.set_webhook(WEBHOOK_URL)
-  print(f"Webhook successfully set to: {WEBHOOK_URL}")
+  try:
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    print(f"Webhook successfully set to: {WEBHOOK_URL}")
+  except Exception as e:
+    print(f"⚠️ Webhook setup warning: {e}")
 
 
 @app.post(WEBHOOK_PATH)
